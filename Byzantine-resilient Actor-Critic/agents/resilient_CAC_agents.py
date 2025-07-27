@@ -42,11 +42,7 @@ class RPBCAC_agent():
         self.critic_attention_layer = critic_attention_layer
 
         self.optimizer_fast = keras.optimizers.SGD(learning_rate=fast_lr)
-        # self.mse = keras.losses.MeanSquaredError()
-        # SparseCategoricalCrossentropy是计算预测的类别分布与真实的类别之间的交叉熵
-        # compile()方法用于配置模型的学习过程，指定优化器和损失函数
         self.actor.compile(optimizer=keras.optimizers.Adam(learning_rate=slow_lr),loss=keras.losses.SparseCategoricalCrossentropy())
-        # 获取critic和team_reward的特征提取部分
         self.critic_features = keras.Model(self.critic.inputs,self.critic.layers[-2].output)
         self.TR_features = keras.Model(self.TR.inputs,self.TR.layers[-2].output)
         self.encoder = tf.keras.Sequential([
@@ -70,7 +66,6 @@ class RPBCAC_agent():
         Sorts a vector by value, eliminates H values strictly larger or smaller than the agent's value, and computes an average of the remaining values
         Arguments: 2D np array with estimated estimation errors (size = n_agents x n_observations)
         Returns: aggregated value for each observation
-        函数返回的是一个经过鲁棒聚合后的值，即通过去除极端值后，对邻居的估计值进行平均得到的结果
         '''
         n_neighbors = values_innodes.shape[0]
         own_val = values_innodes[0]                  #get own value
@@ -86,35 +81,26 @@ class RPBCAC_agent():
     
     def critic_update_team(self,s,critic_agg):
         '''
-        通过邻居的 TD 误差聚合值 来 训练 critic 网络的输出层
         Stochastic update of the critic using the estimated average TD error of the neighbors
         ARGUMENTS: visited consecutive states, aggregated neighbors' TD errors
-        critic_agg是邻居的TD误差的聚合值 是目标值
         RETURNS: training loss
         '''
-        current_obs = s[:,self.agent_index,:]  # 当前智能体的观测
-        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim], 当前智能体的观测编码
+        current_obs = s[:,self.agent_index,:]
+        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim]
         attention_output = self.critic_attention_layer(s, self.agent_index)
         critic_input = tf.concat([obs_encoding, attention_output], axis=-1)  # [B, hidden_dim + hidden_dim]
         phi = self.critic_features(critic_input)
-        # 将phi的每个元素平方后沿着axis=1（按行）进行求和，得到一个一维张量
         phi_norm = tf.math.reduce_sum(tf.math.square(phi),axis=1) + 1
         weights = 1 / (2 * self.fast_lr * phi_norm)
-        # 冻结特征提取层，只训练输出层
         self.critic_features.trainable = False
-        # self.critic.compile(optimizer=self.optimizer_fast,loss=self.mse)
-        # 等价于手动写一轮 forward + backward + optimizer.step() 对网络的输出层进行单批次训练
-        # sample_weight 是一个可选参数，用于 为每个样本指定不同的权重，从而影响损失计算和梯度更新的方式。
         self.critic.train_on_batch(critic_input,critic_agg,sample_weight=weights)
 
     def TR_update_team(self,sa,TR_agg):
         '''
-        通过邻居的误差聚合值 来 训练 reward 网络的输出层
         Stochastic update of the team-average reward function using the estimated average estimation error of the neighbors
         ARGUMENTS: visited states, team actions, agregated neighbors' estimation errors
         RETURNS: training loss
         '''
-        # sa已经在函数外处理好了的[B, n_agents, observation_dim + 1]
         f = self.TR_features(sa)
         f_norm = tf.math.reduce_sum(tf.math.square(f),axis=1).numpy() + 1
         weights = 1 / (2 * self.fast_lr * f_norm)
@@ -124,18 +110,16 @@ class RPBCAC_agent():
 
     def actor_update(self,s,ns,sa,a_local,pretrain=False):
         '''
-        优化智能体的策略
         Stochastic update of the actor network
         - performs a single update of the actor
         - estimates team-average TD errors with a one-step lookahead
         - applies the estimated team-average TD errors as sample weights to the cross-entropy gradient
-        ARGUMENTS: observations, new observations, state-actions pairs, local actions，pretrain是否进行预训练
-        RETURNS: training loss 反映actor网络在当前批次上的训练损失
+        ARGUMENTS: observations, new observations, state-actions pairs, local actions，pretrain
         '''
-        current_obs = s[:,self.agent_index,:]  # 当前智能体的观测
-        next_obs = ns[:,self.agent_index,:]  # 当前智能体的下一个观测
-        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim], 当前智能体的观测编码
-        next_obs_encoding = self.encoder(next_obs)  # [B, hidden_dim], 当前智能体的下一个观测编码
+        current_obs = s[:,self.agent_index,:] 
+        next_obs = ns[:,self.agent_index,:] 
+        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim]
+        next_obs_encoding = self.encoder(next_obs)  # [B, hidden_dim]
         attention_output = self.critic_attention_layer(s, self.agent_index)
         next_attention_output = self.critic_attention_layer(ns, self.agent_index)
         critic_input = tf.concat([obs_encoding, attention_output], axis=-1)  # [B, hidden_dim + hidden_dim]
@@ -161,30 +145,22 @@ class RPBCAC_agent():
         ARGUMENTS: visited consecutive states, local rewards
         RETURNS: updated critic parameters
         '''
-        # 获取当前 critic 网络的所有权重，并将其保存
         critic_weights_temp = self.critic.get_weights()
-        current_obs = s[:,self.agent_index,:]  # 当前智能体的观测
-        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim], 当前智能体的观测编码
+        current_obs = s[:,self.agent_index,:]
+        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim]
         attention_output = self.critic_attention_layer(s, self.agent_index)
         critic_input = tf.concat([obs_encoding, attention_output], axis=-1)  # [B, hidden_dim + hidden_dim]
-        next_obs = ns[:,self.agent_index,:]  # 当前智能体的下一个观测
-        next_obs_encoding = self.encoder(next_obs)  # [B, hidden_dim], 当前智能体的下一个观测编码
+        next_obs = ns[:,self.agent_index,:]
+        next_obs_encoding = self.encoder(next_obs)  # [B, hidden_dim]
         next_attention_output = self.critic_attention_layer(ns, self.agent_index)
         next_critic_input = tf.concat([next_obs_encoding, next_attention_output], axis=-1)  # [B, hidden_dim + hidden_dim]
         nV = self.critic(next_critic_input)
         local_TD_target = r_local + self.gamma * nV
         self.critic_features.trainable = True
-        # self.critic.compile(optimizer=self.optimizer_fast,loss=self.mse)
-        # 使用 fit 方法进行训练 每次训练时使用的样本批次大小batch_size = 状态样本的数量
-        # epochs=5表示对每个批次的训练执行5次更新
-        # verbose=0表示不输出训练过程中的详细信息
-        # training_hist：返回的是训练历史对象，其中包含了每个训练周期的损失等信息。
         training_hist = self.critic.fit(critic_input,local_TD_target,batch_size=s.shape[0],epochs=5,verbose=0)
         critic_weights = self.critic.get_weights()
-        # 局部训练的过程不会永久地改变 critic 网络的权重，而是在一次更新后恢复初始权重
         self.critic.set_weights(critic_weights_temp)
 
-        # 返回训练过程中记录的 损失值，即第一个 epoch 的损失。
         return critic_weights, training_hist.history['loss'][0]
 
     def TR_update_local(self,sa,r_local):
@@ -207,17 +183,12 @@ class RPBCAC_agent():
 
     def resilient_consensus_critic_hidden(self,critic_weights_innodes):
         '''
-        对 critic 网络的 隐藏层参数 进行鲁棒共识更新
         Resilient consensus update over the critic parameters in hidden layers
         - for each parameter, the agent clips H values larger and smaller than the agent's parameter value
         - computes a simple average of the clipped parameter values
-        ARGUMENTS: 是从邻居接收到的 critic 网络的参数 list of critic parameters received from neighbors (the agent's parameters always appear in the first index)
         '''
-        # 存储各个隐藏层经过鲁棒聚合后的权重
         weights_agg = []
         for layer in zip(*critic_weights_innodes):
-            # layer 就是一个包含该层所有邻居权重的元组
-            # 将当前层的权重（layer）转换为 TensorFlow 张量
             weights = tf.convert_to_tensor(layer)
             weights_agg.append(self._resilient_aggregation(weights).numpy())
         self.critic_features.set_weights(weights_agg[:-2])
@@ -237,7 +208,6 @@ class RPBCAC_agent():
 
     def resilient_consensus_critic(self,s,critic_weights_innodes):
         '''
-        计算每个邻居的 critic 网络的弹性输出层输出聚合值
         Resilient consensus update over the critic estimates
         - part of the projection-based updates
         - evaluates critic of each neighbor
@@ -247,8 +217,8 @@ class RPBCAC_agent():
         '''
         critic_weights_temp = self.critic.layers[-1].get_weights()
         critics = []
-        current_obs = s[:,self.agent_index,:]  # 当前智能体的观测
-        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim], 当前智能体的观测编码
+        current_obs = s[:,self.agent_index,:]
+        obs_encoding = self.encoder(current_obs)  # [B, hidden_dim]
         attention_output = self.critic_attention_layer(s, self.agent_index)
         critic_input = tf.concat([obs_encoding, attention_output], axis=-1)  # [B, hidden_dim + hidden_dim]
         for weights in critic_weights_innodes:
@@ -306,16 +276,10 @@ class RPBCAC_agent():
         return [self.actor.get_weights(), self.critic.get_weights(), self.TR.get_weights()]
 
     def get_attention_head_values(self, observation=None):
-        '''
-        获取当前agent在某个观测(observation)下，各个注意力头的输出值。
-        - 如果不给observation，则返回None或者空列表
-        '''
         if observation is None:
             return []
 
-        # 重点：通过 critic_attention_layer 拿到 attention 结果
         attention_outputs = self.critic_attention_layer.get_attention_heads(observation, self.agent_index)
-        # 假设 get_attention_heads 返回的是每个头的输出值组成的 list
 
         return attention_outputs
 
