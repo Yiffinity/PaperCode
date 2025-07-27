@@ -47,8 +47,8 @@ class Faulty_CAC_agent():
         ARGUMENTS: visited states, local rewards and actions
         RETURNS: training loss
         '''
-        current_obs=s[:,self.agent_index,:]  # [B, state_dim], 当前智能体的状态
-        next_obs=ns[:,self.agent_index,:]  # [B, state_dim], 当前智能体的下一个状态
+        current_obs=s[:,self.agent_index,:]  # [B, state_dim],
+        next_obs=ns[:,self.agent_index,:]  # [B, state_dim],
         obs_encoding=self.encoder(current_obs)
         next_obs_encoding=self.encoder(next_obs)
         attention_output = self.critic_attention_layer(s, self.agent_index)
@@ -58,7 +58,6 @@ class Faulty_CAC_agent():
 
         V = self.critic(critic_input)
         nV = self.critic(next_critic_input)
-        # 这里待确定
         TD_error = tf.squeeze(r_local + self.gamma * nV - V).numpy()
         actor_in=self.actor_encoder(s)
         training_stats = self.actor.fit(actor_in,a_local,sample_weight=TD_error,batch_size=200,epochs=1,verbose=0)
@@ -144,10 +143,9 @@ class Malicious_CAC_agent():
         - applies the TD errors as sample weights for the cross-entropy gradient
         ARGUMENTS: visited states, local rewards and actions
         RETURNS: training loss
-        s和ns的形状为 [B, n_agents, observation_dim]
         '''
-        current_obs=s[:,self.agent_index,:]  # [B, state_dim], 当前智能体的状态
-        next_obs=ns[:,self.agent_index,:]  # [B, state_dim], 当前智能体的下一个状态
+        current_obs=s[:,self.agent_index,:]  # [B, state_dim]
+        next_obs=ns[:,self.agent_index,:]  # [B, state_dim]
         obs_encoding=self.encoder(current_obs)
         # obs_encoding=tf.expand_dims(obs_encoding, axis=1)  # [B, 1, hidden_dim]
         attention_output = self.critic_attention_layer(s, self.agent_index)
@@ -161,13 +159,9 @@ class Malicious_CAC_agent():
         V = self.critic(critic_input)
         nV = self.critic(next_critic_input)
         # TD_error = tf.squeeze(r_local + self.gamma * nV - V).numpy()
-        # 这里待确定
-        TD_error = tf.squeeze(r_local + self.gamma * nV - V).numpy()  # 保留 Tensor 形状
-        # actor的输入也改成encoding吧
-        # verbose设置为 1，它会在控制台打印训练进度
+        TD_error = tf.squeeze(r_local + self.gamma * nV - V).numpy()
         actor_in=self.actor_encoder(s)
 
-        # 使用输入 actor_in 和目标输出 a_local，基于 TD-error 的加权损失进行一次前向 + 反向传播，更新网络参数
         training_stats = self.actor.fit(actor_in,a_local,sample_weight=TD_error,batch_size=200,epochs=1,verbose=0)
         self.critic.set_weights(weights_temp)
 
@@ -183,8 +177,8 @@ class Malicious_CAC_agent():
                     boolean to reset parameters to prior values
         RETURNS: updated compromised critic hidden and output layer parameters, training loss
         '''
-        current_obs=s[:,self.agent_index,:]  # [B, state_dim], 当前智能体的状态
-        next_obs=ns[:,self.agent_index,:]  # [B, state_dim], 当前智能体的下一个状态
+        current_obs=s[:,self.agent_index,:] 
+        next_obs=ns[:,self.agent_index,:] 
         obs_encoding=self.encoder(current_obs)
         next_obs_encoding=self.encoder(next_obs)
 
@@ -210,8 +204,8 @@ class Malicious_CAC_agent():
         '''
         weights_temp = self.critic.get_weights()
         self.critic.set_weights(self.critic_local_weights)
-        current_obs=s[:,self.agent_index,:]  # [B, state_dim], 当前智能体的状态
-        next_obs=ns[:,self.agent_index,:]  # [B, state_dim], 当前智能体的下一个状态
+        current_obs=s[:,self.agent_index,:]  # [B, state_dim]
+        next_obs=ns[:,self.agent_index,:]  # [B, state_dim]
         obs_encoding=self.encoder(current_obs)
         next_obs_encoding=self.encoder(next_obs)
         attention_output = self.critic_attention_layer(s, self.agent_index)
@@ -233,7 +227,6 @@ class Malicious_CAC_agent():
                     boolean to reset parameters to prior values
         RETURNS: updated compromised team reward hidden and output layer parameters, training loss
         '''
-        # sa是已经在函数外处理好了的[B, n_agents, observation_dim + 1]
         training_stats = self.TR.fit(sa,r_compromised,epochs=10,batch_size=32,verbose=0)
 
         return self.TR.get_weights(), training_stats.history["loss"][0]
@@ -305,8 +298,8 @@ class Greedy_CAC_agent():
         ARGUMENTS: visited states, local rewards and actions
         RETURNS: training loss
         '''
-        current_obs=s[:,self.agent_index,:]  # [B, state_dim], 当前智能体的状态
-        next_obs=ns[:,self.agent_index,:] # [B, state_dim], 当前智能体的下一个状态
+        current_obs=s[:,self.agent_index,:]  # [B, state_dim]
+        next_obs=ns[:,self.agent_index,:] # [B, state_dim]
         obs_encoding=self.encoder(current_obs)
         next_obs_encoding=self.encoder(next_obs)
         attention_output = self.critic_attention_layer(s, self.agent_index)
@@ -331,7 +324,7 @@ class Greedy_CAC_agent():
         ARGUMENTS: visited consecutive states, local rewards
         RETURNS: updated critic parameters
         '''
-        current_obs=s[:,self.agent_index,:]  # [B, state_dim], 当前智能体的状态
+        current_obs=s[:,self.agent_index,:]  # [B, state_dim]
         next_obs=ns[:,self.agent_index,:]
 
         obs_encoding=self.encoder(current_obs)
@@ -354,7 +347,6 @@ class Greedy_CAC_agent():
         ARGUMENTS: state-action pairs, local rewards
         RETURNS: updated team reward parameters
         '''
-        # sa是已经在函数外处理好了的[B, n_agents, observation_dim + 1]
         training_stats = self.TR.fit(sa,r_local,epochs=10,batch_size=32,verbose=0)
 
         return self.TR.get_weights(), training_stats.history['loss'][0]
