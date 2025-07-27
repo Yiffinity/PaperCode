@@ -1,17 +1,35 @@
+import datetime
+import os
 import numpy as np
 import gym
 from gym import spaces
 import tensorflow as tf
 from tensorflow import keras
+from tensorflow.keras import Input, Model, Sequential, layers
 import pandas as pd
 
 tf.get_logger().setLevel('ERROR')
 
+'''
+This file contains a function for training consensus AC agents in gym environments. It is designed for batch updates.
+'''
 
-def train_BRAC(env,agents,args,exp_buffer=None):
+def train_RPBCAC(env,agents,args,exp_buffer=None):
+    '''
+    FUNCTION train_RBPCAC() - training a mixed cooperative and adversarial network of consensus AC agents including RPBCAC agents
+    The agents apply actions sampled from the actor network and estimate online the team-average errors for the critic and team-average reward updates.
+    At the end of a sequence of episodes, the agents update the actor, critic, and team-average reward parameters in batches. All participating agents
+    transmit their critic and team reward parameters but only cooperative agents perform resilient consensus updates. The critic and team-average reward
+    networks are used for the evaluation of the actor gradient. In addition to the critic and team reward updates, the adversarial agents separately
+    update their local critic that is used in their actor updates.
 
+    ARGUMENTS: gym environment
+               list of resilient consensus AC agents
+               user-defined parameters for the simulation
+    '''
     paths = []
     n_agents, n_states = env.n_agents, args['n_states']
+    observation_dim = (n_agents + 1) * n_states
     n_coop = args['agent_label'].count('Cooperative')
     gamma = args['gamma']
     in_nodes = args['in_nodes']
@@ -23,90 +41,160 @@ def train_BRAC(env,agents,args,exp_buffer=None):
         nstates = exp_buffer[1]
         actions = exp_buffer[2]
         rewards = exp_buffer[3]
+        observation = exp_buffer[4]
+        nobservation = exp_buffer[5]
     else:
-        states, nstates, actions, rewards = [], [], [], []
+        states, nstates, actions, rewards, observations, nobservations = [], [], [], [], [], []
     #---------------------------------------------------------------------------
     '                                 TRAINING                                 '
     #---------------------------------------------------------------------------
     for t in range(n_episodes):
 
+        '''
+            j:用于在每个训练周期中跟踪当前 episode 的步骤数
+            ep_returns:用于跟踪当前 episode 的总回报，即该 episode 中所有步骤的累计奖励
+            est_returns:用于跟踪每个 agent 的估计回报
+            mean_true_returns:用于跟踪合作 agent 的平均真实回报
+            mean_true_returns_adv:用于跟踪对抗 agent 的平均真实回报
+            action:用于存储每个 agent 在当前步骤中采取的动作
+            actor_loss:用于存储每个 agent 的 actor 网络的损失
+            critic_loss:用于存储每个 agent 的 critic 网络的损失
+            TR_loss:用于存储每个 agent 的团队奖励网络的损失
+            i:用于跟踪当前 episode 的索引
+            n_ep_fixed:  在一个固定策略下的训练回合数
+            i = t % n_ep_fixed:固定策略的训练周期计数
+        '''
         j,  ep_returns = 0, 0
         est_returns, mean_true_returns, mean_true_returns_adv = [], 0, 0
         action, actor_loss, critic_loss, TR_loss = np.zeros(n_agents), np.zeros(n_agents), np.zeros(n_agents), np.zeros(n_agents)
         i = t % n_ep_fixed
-
+        #-----------------------------------------------------------------------
+        '                       BEGINNING OF EPISODE                           '
+        #-----------------------------------------------------------------------
         env.reset()
-        state, _, _ = env.get_data()
-
+        # state的形状是 (n_agents,state_dim)，表示每个智能体的坐标
+        state, _ = env.get_data()
+        # 所有智能体的观测值 (n_agents, observation_dim)
+        observation = env.get_observations() 
+        #-----------------------------------------------------------------------
+        '       Evaluate expected returns at the beginning of episode           '
+        #-----------------------------------------------------------------------
         for node in range(n_agents):
             if args['agent_label'][node] == 'Cooperative':
-                est_returns.append(agents[node].critic(state.reshape(1,state.shape[0],state.shape[1]))[0][0].numpy())
-
+                # 如果agents是合作的，est_returns记录每个agent的critic网络的输出
+                current_obs = observation[:,node,:]
+                obs_encoding = agents[node].encoder(current_obs)
+                attention_out = agents[node].critic_attention_layer(observation, node)
+                critic_in = tf.concat([obs_encoding, attention_out], axis=-1)
+                est_returns.append(agents[node].critic(critic_in)[0][0].numpy())
+        #-----------------------------------------------------------------------
+        '                           Simulate episode                           '
+        #-----------------------------------------------------------------------
         while j < max_ep_len:
             for node in range(n_agents):
-                action[node] = agents[node].get_action(state.reshape(1,state.shape[0],state.shape[1]),t)
+                  action[node] = agents[node].get_action(observation)
             env.step(action)
-            nstate, reward, _ = env.get_data()
+            nstate, reward = env.get_data()
+            nobservation = env.get_observations()
             ep_returns += reward * (gamma ** j)
             j += 1
-
+            #-----------------------------------------------------------------------
+            '                    Update experience replay buffers                  '
+            #-----------------------------------------------------------------------
             states.append(np.array(state))
             nstates.append(np.array(nstate))
             actions.append(np.array(action).reshape(-1,1))
             rewards.append(np.array(reward).reshape(-1,1))
+            observations.append(observation)  #tensor
+            nobservations.append(nobservation)  #tensor
             state = np.array(nstate)
+            observation = nobservation
 
+            #------------------------------------------------------------------------
+            '                             END OF EPISODE                            '
+            #------------------------------------------------------------------------
+            '                            ALGORITHM UPDATES                          '
+            #------------------------------------------------------------------------
             if i == n_ep_fixed-1 and j == max_ep_len:
+                # 已经完成了一个完整的固定策略训练周期
 
+                # Convert experiences to tensors
                 s = tf.convert_to_tensor(states,tf.float32)
                 ns = tf.convert_to_tensor(nstates,tf.float32)
                 r = tf.convert_to_tensor(rewards,tf.float32)
                 a = tf.convert_to_tensor(actions,tf.float32)
-                sa = tf.concat([s,a],axis=-1)
+                obs = tf.squeeze(observations,axis=1)
+                nobs = tf.squeeze(nobservations,axis=1)
+                # s 是一个 tf.Tensor，形状为 (1, n_agents, n_states)，类型为 tf.float32
+                # a 是一个 tf.Tensor，形状为 (1, n_agents, 1)，类型为 tf.float32
+                # 如下这个sa之后修改为env.observations()的输出与上面a拼接就行
+                # sa = tf.concat([s,a],axis=-1)
+                sa = tf.concat([obs, a], axis=-1)  # [1, n_agents, observation_dim + 1]
 
+                # Evaluate team-average reward of cooperative agents
+                # r.shape[0]：表示批次的大小，r.shape[2]表示每个代理的奖励维度
                 r_coop = tf.zeros([r.shape[0],r.shape[2]],tf.float32)
                 for node in (x for x in range(n_agents) if args['agent_label'][x] == 'Cooperative'):
+                    # r[:,node]:返回的是一个形状为 (time_steps, 1) 的张量，包含了 第 node 个智能体在每个时间步的奖励
                     r_coop += r[:,node] / n_coop
 
                 for n in range(n_epochs):
                     critic_weights,TR_weights = [],[]
-
-                    #LOCAL 
+                    #--------------------------------------------------------------------
+                    '             I) LOCAL CRITIC AND TEAM-AVERAGE REWARD UPDATES       '
+                    #--------------------------------------------------------------------
                     for node in range(n_agents):
                         r_applied = r_coop if args['common_reward'] else r[:,node]
                         if args['agent_label'][node] == 'Cooperative':
                             x, TR_loss[node] = agents[node].TR_update_local(sa,r_applied)
-                            y, critic_loss[node] = agents[node].critic_update_local(s,ns,r_applied)
+                            y, critic_loss[node] = agents[node].critic_update_local(obs,nobs,r_applied)
                         elif args['agent_label'][node] == 'Greedy':
                             x, TR_loss[node] = agents[node].TR_update_local(sa,r[:,node])
-                            y, critic_loss[node] = agents[node].critic_update_local(s,ns,r[:,node])
+                            y, critic_loss[node] = agents[node].critic_update_local(obs,nobs,r[:,node])
                         elif args['agent_label'][node] == 'Malicious':
-                            agents[node].critic_update_local(s,ns,r[:,node])
+                            agents[node].critic_update_local(obs,nobs,r[:,node])
                             x, TR_loss[node] = agents[node].TR_update_compromised(sa,-r_coop)
-                            y, critic_loss[node] = agents[node].critic_update_compromised(s,ns,-r_coop)
+                            y, critic_loss[node] = agents[node].critic_update_compromised(obs,nobs,-r_coop)
+                        elif args['agent_label'][node] == 'Faulty':
+                            x = agents[node].get_TR_weights()
+                            y = agents[node].get_critic_weights()
                         TR_weights.append(x)
                         critic_weights.append(y)
-                    #BR-AC
+                    #--------------------------------------------------------------------
+                    '                     II) RESILIENT CONSENSUS UPDATES               '
+                    #--------------------------------------------------------------------
                     for node in (x for x in range(n_agents) if args['agent_label'][x] == 'Cooperative'):
-
+                        #----------------------------------------------------------------
+                        '               a) RECEIVE PARAMETERS FROM NEIGHBORS            '
+                        #----------------------------------------------------------------
                         critic_weights_innodes = [critic_weights[i] for i in in_nodes[node]]
                         TR_weights_innodes = [TR_weights[i] for i in in_nodes[node]]
-
+                        #----------------------------------------------------------------
+                        '               b) CONSENSUS UPDATES OF HIDDEN LAYERS           '
+                        #----------------------------------------------------------------
                         agents[node].resilient_consensus_critic_hidden(critic_weights_innodes)
                         agents[node].resilient_consensus_TR_hidden(TR_weights_innodes)
-
-                        critic_agg = agents[node].resilient_consensus_critic(s,critic_weights_innodes)
+                        #----------------------------------------------------------------
+                        '               c) CONSENSUS OVER UPDATED ESTIMATES             '
+                        #----------------------------------------------------------------
+                        critic_agg = agents[node].resilient_consensus_critic(obs,critic_weights_innodes)
                         TR_agg = agents[node].resilient_consensus_TR(sa,TR_weights_innodes)
-
-                        agents[node].critic_update_team(s,critic_agg)
+                        #----------------------------------------------------------------
+                        '    d) STOCHASTIC UPDATES USING AGGREGATED ESTIMATION ERRORS   '
+                        #----------------------------------------------------------------
+                        agents[node].critic_update_team(obs,critic_agg)
                         agents[node].TR_update_team(sa,TR_agg)
-
+                #--------------------------------------------------------------------
+                '                           III) ACTOR UPDATES                      '
+                #--------------------------------------------------------------------
                 for node in range(n_agents):
                     if args['agent_label'][node] == 'Cooperative':
-                        actor_loss[node] = agents[node].actor_update(s[-max_ep_len*n_ep_fixed:],ns[-max_ep_len*n_ep_fixed:],sa[-max_ep_len*n_ep_fixed:],a[-max_ep_len*n_ep_fixed:,node])
+                        actor_loss[node] = agents[node].actor_update(obs[-max_ep_len*n_ep_fixed:],nobs[-max_ep_len*n_ep_fixed:],sa[-max_ep_len*n_ep_fixed:],a[-max_ep_len*n_ep_fixed:,node])
                     else:
-                        actor_loss[node] = agents[node].actor_update(s[-max_ep_len*n_ep_fixed:],ns[-max_ep_len*n_ep_fixed:],r[-max_ep_len*n_ep_fixed:,node],a[-max_ep_len*n_ep_fixed:,node])
-
+                        actor_loss[node] = agents[node].actor_update(obs[-max_ep_len*n_ep_fixed:],nobs[-max_ep_len*n_ep_fixed:],r[-max_ep_len*n_ep_fixed:,node],a[-max_ep_len*n_ep_fixed:,node])
+                #--------------------------------------------------------------------
+                '                   IV) EXPERIENCE REPLAY BUFFER UPDATES             '
+                #--------------------------------------------------------------------
 
                 if len(states) > buffer_size:
                     q = len(states) - buffer_size
@@ -114,25 +202,43 @@ def train_BRAC(env,agents,args,exp_buffer=None):
                     del nstates[:q]
                     del actions[:q]
                     del rewards[:q]
+                    del observations[:q]
+                    del nobservations[:q]
 
+        #----------------------------------------------------------------------------
+        '                           TRAINING EPISODE SUMMARY                        '
+        #----------------------------------------------------------------------------
         for node in range(n_agents):
             if args['agent_label'][node] == 'Cooperative':
                 mean_true_returns += ep_returns[node]/n_coop
             else:
                 mean_true_returns_adv += ep_returns[node]/(n_agents-n_coop)
-
+        if t==0 and i==0:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            log_filename = f'log_{timestamp}.txt'
+            run_dir = f"run_{timestamp}"
+            # Create a directory with the timestamp
+            os.makedirs(run_dir, exist_ok=True)
         output = '| Episode: {} | Est. returns: {} | Returns: {} | Average critic loss: {} | Average TR loss: {} | Average actor loss: {}'.format(t,est_returns,mean_true_returns,critic_loss,TR_loss,actor_loss)
         print(output)
-        with open('./log.txt', 'a') as file:
-            file.write(output + '\n')  
-            
+        with open(log_filename, 'a') as file:
+            file.write(output + '\n')        
         path = {
                 "True_team_returns":mean_true_returns,
                 "True_adv_returns":mean_true_returns_adv,
                 "Estimated_team_returns":np.mean(est_returns)
                }
         paths.append(path)
+        # if (t+1) % 2000 == 0:
+        #     sim_data = pd.DataFrame.from_dict(paths)
+        #     # Save the sim_data with the timestamped folder
+        #     sim_data.to_pickle(f"./{run_dir}/sim_data_ep{t+1}.pkl")
+        #     l_weights = [agent.get_parameters() for agent in agents]
+        #     np.save(f'new Results/0.005_0.02_10000/pretrained_weights_{t+1}.npy', l_weights, allow_pickle=True)
+
 
     sim_data = pd.DataFrame.from_dict(paths)
+
+    sim_data.to_pickle(f"./{run_dir}/sim_data_end.pkl")
     weights = [agent.get_parameters() for agent in agents]
     return weights,sim_data
