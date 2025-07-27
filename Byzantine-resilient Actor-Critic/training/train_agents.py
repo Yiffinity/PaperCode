@@ -49,21 +49,6 @@ def train_RPBCAC(env,agents,args,exp_buffer=None):
     '                                 TRAINING                                 '
     #---------------------------------------------------------------------------
     for t in range(n_episodes):
-
-        '''
-            j:用于在每个训练周期中跟踪当前 episode 的步骤数
-            ep_returns:用于跟踪当前 episode 的总回报，即该 episode 中所有步骤的累计奖励
-            est_returns:用于跟踪每个 agent 的估计回报
-            mean_true_returns:用于跟踪合作 agent 的平均真实回报
-            mean_true_returns_adv:用于跟踪对抗 agent 的平均真实回报
-            action:用于存储每个 agent 在当前步骤中采取的动作
-            actor_loss:用于存储每个 agent 的 actor 网络的损失
-            critic_loss:用于存储每个 agent 的 critic 网络的损失
-            TR_loss:用于存储每个 agent 的团队奖励网络的损失
-            i:用于跟踪当前 episode 的索引
-            n_ep_fixed:  在一个固定策略下的训练回合数
-            i = t % n_ep_fixed:固定策略的训练周期计数
-        '''
         j,  ep_returns = 0, 0
         est_returns, mean_true_returns, mean_true_returns_adv = [], 0, 0
         action, actor_loss, critic_loss, TR_loss = np.zeros(n_agents), np.zeros(n_agents), np.zeros(n_agents), np.zeros(n_agents)
@@ -72,16 +57,13 @@ def train_RPBCAC(env,agents,args,exp_buffer=None):
         '                       BEGINNING OF EPISODE                           '
         #-----------------------------------------------------------------------
         env.reset()
-        # state的形状是 (n_agents,state_dim)，表示每个智能体的坐标
         state, _ = env.get_data()
-        # 所有智能体的观测值 (n_agents, observation_dim)
         observation = env.get_observations() 
         #-----------------------------------------------------------------------
         '       Evaluate expected returns at the beginning of episode           '
         #-----------------------------------------------------------------------
         for node in range(n_agents):
             if args['agent_label'][node] == 'Cooperative':
-                # 如果agents是合作的，est_returns记录每个agent的critic网络的输出
                 current_obs = observation[:,node,:]
                 obs_encoding = agents[node].encoder(current_obs)
                 attention_out = agents[node].critic_attention_layer(observation, node)
@@ -116,8 +98,6 @@ def train_RPBCAC(env,agents,args,exp_buffer=None):
             '                            ALGORITHM UPDATES                          '
             #------------------------------------------------------------------------
             if i == n_ep_fixed-1 and j == max_ep_len:
-                # 已经完成了一个完整的固定策略训练周期
-
                 # Convert experiences to tensors
                 s = tf.convert_to_tensor(states,tf.float32)
                 ns = tf.convert_to_tensor(nstates,tf.float32)
@@ -125,17 +105,11 @@ def train_RPBCAC(env,agents,args,exp_buffer=None):
                 a = tf.convert_to_tensor(actions,tf.float32)
                 obs = tf.squeeze(observations,axis=1)
                 nobs = tf.squeeze(nobservations,axis=1)
-                # s 是一个 tf.Tensor，形状为 (1, n_agents, n_states)，类型为 tf.float32
-                # a 是一个 tf.Tensor，形状为 (1, n_agents, 1)，类型为 tf.float32
-                # 如下这个sa之后修改为env.observations()的输出与上面a拼接就行
-                # sa = tf.concat([s,a],axis=-1)
                 sa = tf.concat([obs, a], axis=-1)  # [1, n_agents, observation_dim + 1]
 
                 # Evaluate team-average reward of cooperative agents
-                # r.shape[0]：表示批次的大小，r.shape[2]表示每个代理的奖励维度
                 r_coop = tf.zeros([r.shape[0],r.shape[2]],tf.float32)
                 for node in (x for x in range(n_agents) if args['agent_label'][x] == 'Cooperative'):
-                    # r[:,node]:返回的是一个形状为 (time_steps, 1) 的张量，包含了 第 node 个智能体在每个时间步的奖励
                     r_coop += r[:,node] / n_coop
 
                 for n in range(n_epochs):
@@ -229,12 +203,6 @@ def train_RPBCAC(env,agents,args,exp_buffer=None):
                 "Estimated_team_returns":np.mean(est_returns)
                }
         paths.append(path)
-        # if (t+1) % 2000 == 0:
-        #     sim_data = pd.DataFrame.from_dict(paths)
-        #     # Save the sim_data with the timestamped folder
-        #     sim_data.to_pickle(f"./{run_dir}/sim_data_ep{t+1}.pkl")
-        #     l_weights = [agent.get_parameters() for agent in agents]
-        #     np.save(f'new Results/0.005_0.02_10000/pretrained_weights_{t+1}.npy', l_weights, allow_pickle=True)
 
 
     sim_data = pd.DataFrame.from_dict(paths)
